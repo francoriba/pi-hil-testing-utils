@@ -525,7 +525,7 @@ def _execute_via_daemon(args, daemon_client: DaemonClient) -> int:
         return 2
 
 def _execute_direct(args) -> int:
-    """Ejecuta comandos directamente (método original)."""
+    """Ejecuta comandos directamente (metodo original)."""
     controller = ArduinoRelayController(
         port=args.port,
         baudrate=args.baudrate,
