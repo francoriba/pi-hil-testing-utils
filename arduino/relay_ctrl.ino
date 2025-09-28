@@ -17,15 +17,15 @@
  *    IN1..IN6 -> D2..D7
  *
  *  Comandos disponibles por Serial:
- *    ON n       : enciende el relé n (0..5)
- *    OFF n      : apaga el relé n
- *    TOGGLE n   : cambia el estado del relé n
- *    PULSE n ms : enciende el relé n durante ms milisegundos
- *    ALLON      : enciende todos los relés
- *    ALLOFF     : apaga todos los relés
- *    STATUS     : imprime el estado de todos los relés
- *    HELP       : muestra ayuda
- *    ID         : identificación del dispositivo
+ *    ON n [n ...]      : enciende uno o varios relés (0..5)
+ *    OFF n [n ...]     : apaga uno o varios relés
+ *    TOGGLE n [n ...]  : alterna uno o varios relés
+ *    PULSE n ms        : enciende el relé n durante ms milisegundos
+ *    ALLON             : enciende todos los relés
+ *    ALLOFF            : apaga todos los relés
+ *    STATUS            : imprime el estado de todos los relés
+ *    HELP              : muestra ayuda
+ *    ID                : identificación del dispositivo
  *
  *  Notas:
  *    - La mayoría de módulos son activos en bajo (LOW = ON).
@@ -86,7 +86,8 @@ void printStatus() {
  */
 void help() {
   Serial.println(F("Comandos disponibles:"));
-  Serial.println(F("  ON n | OFF n | TOGGLE n | PULSE n ms"));
+  Serial.println(F("  ON n [n ...] | OFF n [n ...] | TOGGLE n [n ...]"));
+  Serial.println(F("  PULSE n ms"));
   Serial.println(F("  ALLON | ALLOFF | STATUS | HELP | ID"));
   Serial.println(F("  n=0..5, ms=milisegundos (1..60000)"));
 }
@@ -114,7 +115,7 @@ bool readLine(String &out) {
     char c = Serial.read();
     if (c == '\r') continue;
     if (c == '\n') return true;
-    if (out.length() < 64) out += c; // límite simple
+    if (out.length() < 128) out += c; // un poco más de margen
   }
   return false;
 }
@@ -124,9 +125,58 @@ bool readLine(String &out) {
  */
 int toIntSafe(const String &s, bool &ok) {
   if (s.length() == 0) { ok = false; return 0; }
+  // Validación básica: debe empezar en dígito (permitimos '0')
+  bool digitFound = false;
+  for (uint16_t i = 0; i < s.length(); i++) {
+    if (isDigit(s[i])) { digitFound = true; break; }
+  }
+  if (!digitFound) { ok = false; return 0; }
   long v = s.toInt();
   ok = true;
   return (int)v;
+}
+
+/**
+ * @brief Procesa comandos de múltiples canales: ON/OFF/TOGGLE <n> [n ...]
+ */
+void processMultiChannelCommand(const String &cmd, String rest) {
+  if (rest.length() == 0) {
+    Serial.println(F("ERR se requieren canales (0..5). Ej: ON 0 1 3"));
+    return;
+  }
+
+  bool anyApplied = false;
+
+  // Iterar por tokens separados por espacio
+  while (rest.length() > 0) {
+    int sp = rest.indexOf(' ');
+    String tok = (sp < 0) ? rest : rest.substring(0, sp);
+    rest = (sp < 0) ? "" : rest.substring(sp + 1);
+    rest.trim();
+    tok.trim();
+
+    if (tok.length() == 0) continue;
+
+    bool ok = false;
+    int ch = toIntSafe(tok, ok);
+    if (!ok || ch < 0 || ch >= (int)RELAY_COUNT) {
+      Serial.print(F("WARN token inválido/ fuera de rango: "));
+      Serial.println(tok);
+      continue;
+    }
+
+    if (cmd == F("ON")) {
+      applyRelay((uint8_t)ch, R_ON);
+    } else if (cmd == F("OFF")) {
+      applyRelay((uint8_t)ch, R_OFF);
+    } else { // TOGGLE
+      applyRelay((uint8_t)ch, states[ch] == R_ON ? R_OFF : R_ON);
+    }
+    anyApplied = true;
+  }
+
+  if (anyApplied) printStatus();
+  else Serial.println(F("ERR no se aplicó ningún canal válido"));
 }
 
 void loop() {
@@ -144,16 +194,8 @@ void loop() {
   rest.trim();
 
   if (cmd == F("ON") || cmd == F("OFF") || cmd == F("TOGGLE")) {
-    bool ok = false;
-    int ch = toIntSafe(rest, ok);
-    if (!ok || ch < 0 || ch >= RELAY_COUNT) {
-      Serial.println(F("ERR canal inválido (0..5)"));
-    } else {
-      if (cmd == F("ON"))       applyRelay(ch, R_ON);
-      else if (cmd == F("OFF")) applyRelay(ch, R_OFF);
-      else                      applyRelay(ch, states[ch] == R_ON ? R_OFF : R_ON);
-      printStatus();
-    }
+    processMultiChannelCommand(cmd, rest);
+
   } else if (cmd == F("PULSE")) {
     int sp = rest.indexOf(' ');
     if (sp < 0) {
@@ -171,16 +213,22 @@ void loop() {
         printStatus();
       }
     }
+
   } else if (cmd == F("ALLON")) {
     allRelays(R_ON); printStatus();
+
   } else if (cmd == F("ALLOFF")) {
     allRelays(R_OFF); printStatus();
+
   } else if (cmd == F("STATUS")) {
     printStatus();
+
   } else if (cmd == F("HELP")) {
     help();
+
   } else if (cmd == F("ID")) {
     Serial.println(F("RELAY-CTRL v1 (6ch)"));
+
   } else {
     Serial.println(F("ERR comando desconocido (try HELP)"));
   }

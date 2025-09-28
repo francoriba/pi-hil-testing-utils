@@ -12,7 +12,7 @@ readonly POWER_RELAY_CHANNEL=0
 readonly SERIAL_RELAY_CHANNEL=1
 readonly ROUTER_PORT="/dev/glinet-mango"
 readonly BAUDRATE=115200
-readonly WAIT_AFTER_POWER=10
+readonly WAIT_AFTER_POWER=30
 readonly WAIT_AFTER_SERIAL=3
 
 log()  { printf '%s\n' "$*"; }
@@ -36,12 +36,13 @@ check_serial_port() {
 
 power_on_sequence() {
   log "Power seq…"
-  python3 "$ARDUINO_SCRIPT" on  "$POWER_RELAY_CHANNEL"
-  python3 "$ARDUINO_SCRIPT" on  "$SERIAL_RELAY_CHANNEL"
+  #python3 "$ARDUINO_SCRIPT" on  "$POWER_RELAY_CHANNEL"
+  #python3 "$ARDUINO_SCRIPT" on  "$SERIAL_RELAY_CHANNEL"
+  python3 "$ARDUINO_SCRIPT" on "$POWER_RELAY_CHANNEL" "$SERIAL_RELAY_CHANNEL" || { err "No pude encender relés power+serial"; exit 1; } # apago serial y router
   sleep 3
-  python3 "$ARDUINO_SCRIPT" off "$POWER_RELAY_CHANNEL"
+  python3 "$ARDUINO_SCRIPT" off "$POWER_RELAY_CHANNEL" # prendo router
   sleep "$WAIT_AFTER_POWER"
-  python3 "$ARDUINO_SCRIPT" off "$SERIAL_RELAY_CHANNEL"
+  python3 "$ARDUINO_SCRIPT" off "$SERIAL_RELAY_CHANNEL" # prendo serial
   sleep "$WAIT_AFTER_SERIAL"
   ok "Power seq OK"
 }

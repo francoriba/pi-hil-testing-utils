@@ -8,13 +8,15 @@ via USB-Serial interface.
 
 Author: FCEFyN-UNC
 Project: pi-hil-testing-utils
-Version: 1.0.0
+Version: 1.1.0
 License: MIT
 
 Features:
 - Control individual relays (0-5)
-- Bulk operations (all on/off)
-- Status monitoring
+- Multi-channel operations (e.g., on 0 1 3)
+- Bulk operations (all-on / all-off)
+- Toggle and pulse (per-channel)
+- Status monitoring (parsed)
 - Error handling and logging
 - Command-line interface
 - Robust serial communication
@@ -26,7 +28,7 @@ import serial
 import sys
 import time
 from enum import IntEnum
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Iterable, List
 
 # Configure logging
 logging.basicConfig(
@@ -49,8 +51,11 @@ class ArduinoCommands:
     ID = "ID"
     ON = "ON"
     OFF = "OFF"
+    TOGGLE = "TOGGLE"
+    PULSE = "PULSE"
     STATUS = "STATUS"
     ALL_OFF = "ALLOFF"
+    ALL_ON = "ALLON"
 
 
 class ArduinoResponses:
@@ -62,14 +67,7 @@ class ArduinoResponses:
 
 class ArduinoRelayController:
     """
-    This class provides a robust interface for controlling a 6-channel relay module
-    connected to an Arduino board via serial communication.
-
-    Attributes:
-        port (str): Serial port path
-        baudrate (int): Serial communication speed
-        timeout (float): Communication timeout in seconds
-        connection (Optional[serial.Serial]): Active serial connection
+    Robust interface for controlling a 6-channel relay module via Arduino (Serial).
     """
 
     def __init__(
@@ -78,31 +76,13 @@ class ArduinoRelayController:
             baudrate: int = 115200,
             timeout: float = 2.0
     ) -> None:
-        """
-        Initialize the Arduino relay controller.
-
-        Args:
-            port: Serial port path (default: /dev/arduino-relay)
-            baudrate: Serial communication speed (default: 115200)
-            timeout: Communication timeout in seconds (default: 2.0)
-        """
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
         self.connection: Optional[serial.Serial] = None
-
         logger.info(f"Initialized ArduinoRelayController - Port: {port}, Baudrate: {baudrate}")
 
     def connect(self) -> bool:
-        """
-        Establish connection with the Arduino device.
-
-        Returns:
-            bool: True if connection is successful, False otherwise
-
-        Raises:
-            serial.SerialException: If serial port cannot be opened
-        """
         try:
             logger.info(f"Attempting to connect to Arduino on port {self.port}")
 
@@ -113,13 +93,11 @@ class ArduinoRelayController:
                 write_timeout=self.timeout
             )
 
-            # Allow Arduino to initialize
-            logger.debug("Waiting for Arduino initialization...")
+            # Allow Arduino to reset after opening serial
             time.sleep(2)
 
-            # Clear communication buffers
-            self.connection.flushInput()
-            self.connection.flushOutput()
+            self.connection.reset_input_buffer()
+            self.connection.reset_output_buffer()
 
             # Verify device responds correctly
             if self._send_command(ArduinoCommands.ID):
@@ -144,95 +122,59 @@ class ArduinoRelayController:
             return False
 
     def disconnect(self) -> None:
-        """Close the connection with the Arduino device."""
         if self.connection and self.connection.is_open:
             logger.info("Disconnecting from Arduino")
             self.connection.close()
             self.connection = None
-        else:
-            logger.debug("No active connection to disconnect")
 
     def is_connected(self) -> bool:
-        """
-        Check if the controller is currently connected to the Arduino.
-
-        Returns:
-            bool: True if connected and ready for communication
-        """
         return self.connection is not None and self.connection.is_open
 
+    # -------- Single-channel helpers (kept for compatibility) --------
     def relay_on(self, channel: int) -> bool:
-        """
-        Turn on a specific relay channel.
-
-        Args:
-            channel: Relay channel number (0-5)
-
-        Returns:
-            bool: True if operation was successful
-
-        Raises:
-            ValueError: If channel is not in valid range (0-5)
-        """
         self._validate_channel(channel)
-
         logger.info(f"Turning ON relay channel {channel}")
-
-        if self._send_command(f"{ArduinoCommands.ON} {channel}"):
-            response = self._read_response()
-            if self._is_success_response(response):
-                logger.info(f"Relay {channel} turned ON successfully. Response: {response}")
-                return True
-
-        logger.error(f"Failed to turn ON relay {channel}")
-        return False
+        return self._exec_and_ok(f"{ArduinoCommands.ON} {channel}")
 
     def relay_off(self, channel: int) -> bool:
-        """
-        Turn off a specific relay channel.
-
-        Args:
-            channel: Relay channel number (0-5)
-
-        Returns:
-            bool: True if operation was successful
-
-        Raises:
-            ValueError: If channel is not in valid range (0-5)
-        """
         self._validate_channel(channel)
         logger.info(f"Turning OFF relay channel {channel}")
-        if self._send_command(f"{ArduinoCommands.OFF} {channel}"):
-            response = self._read_response()
-            if self._is_success_response(response):
-                logger.info(f"Relay {channel} turned OFF successfully. Response: {response}")
-                return True
-        logger.error(f"Failed to turn OFF relay {channel}")
-        return False
+        return self._exec_and_ok(f"{ArduinoCommands.OFF} {channel}")
 
+    # -------- Multi-channel helpers --------
+    def relays_on(self, channels: Iterable[int]) -> bool:
+        ch = self._validate_channels(channels)
+        logger.info(f"Turning ON relay channels {ch}")
+        return self._exec_and_ok(f"{ArduinoCommands.ON} " + " ".join(map(str, ch)))
+
+    def relays_off(self, channels: Iterable[int]) -> bool:
+        ch = self._validate_channels(channels)
+        logger.info(f"Turning OFF relay channels {ch}")
+        return self._exec_and_ok(f"{ArduinoCommands.OFF} " + " ".join(map(str, ch)))
+
+    def relays_toggle(self, channels: Iterable[int]) -> bool:
+        ch = self._validate_channels(channels)
+        logger.info(f"Toggling relay channels {ch}")
+        return self._exec_and_ok(f"{ArduinoCommands.TOGGLE} " + " ".join(map(str, ch)))
+
+    def pulse(self, channel: int, milliseconds: int) -> bool:
+        self._validate_channel(channel)
+        if not (1 <= milliseconds <= 60000):
+            raise ValueError("Invalid milliseconds. Must be 1..60000")
+        logger.info(f"Pulsing relay {channel} for {milliseconds} ms")
+        return self._exec_and_ok(f"{ArduinoCommands.PULSE} {channel} {milliseconds}")
+
+    # -------- Bulk helpers --------
     def all_relays_off(self) -> bool:
-        """
-        Turn off all relay channels simultaneously.
-
-        Returns:
-            bool: True if operation was successful
-        """
         logger.info("Turning OFF all relays")
-        if self._send_command(ArduinoCommands.ALL_OFF):
-            response = self._read_response()
-            if self._is_success_response(response):
-                logger.info(f"All relays turned OFF successfully. Response: {response}")
-                return True
-        logger.error("Failed to turn OFF all relays")
-        return False
+        return self._exec_and_ok(ArduinoCommands.ALL_OFF)
 
+    def all_relays_on(self) -> bool:
+        logger.info("Turning ON all relays")
+        return self._exec_and_ok(ArduinoCommands.ALL_ON)
+
+    # -------- Status --------
     def get_status(self) -> Optional[Dict[str, Any]]:
-        """
-        Get the current status of all relay channels.
-
-        Returns:
-            Optional[Dict[str, Any]]: Status information or None if error occurred
-        """
         logger.debug("Requesting relay status")
         if self._send_command(ArduinoCommands.STATUS):
             response = self._read_response()
@@ -242,29 +184,29 @@ class ArduinoRelayController:
         logger.error("Failed to get relay status")
         return None
 
+    # -------- Internals --------
+    def _exec_and_ok(self, command: str) -> bool:
+        if self._send_command(command):
+            response = self._read_response()
+            if self._is_success_response(response):
+                logger.debug(f"OK: {response}")
+                return True
+            logger.error(f"Command failed. Resp: {response}")
+        return False
+
     def _validate_channel(self, channel: int) -> None:
-        """
-        Validate relay channel number.
-
-        Args:
-            channel: Channel number to validate
-
-        Raises:
-            ValueError: If channel is not in valid range
-        """
         if not 0 <= channel <= 5:
             raise ValueError(f"Invalid channel {channel}. Must be 0-5")
 
+    def _validate_channels(self, channels: Iterable[int]) -> List[int]:
+        ch_list = list(channels)
+        if not ch_list:
+            raise ValueError("No channels provided")
+        for c in ch_list:
+            self._validate_channel(int(c))
+        return [int(c) for c in ch_list]
+
     def _send_command(self, command: str) -> bool:
-        """
-        Send a command to the Arduino device.
-
-        Args:
-            command: Command string to send
-
-        Returns:
-            bool: True if command was sent successfully
-        """
         if not self.is_connected():
             logger.error("No active connection to Arduino")
             return False
@@ -279,72 +221,70 @@ class ArduinoRelayController:
             return False
 
     def _read_response(self, max_lines: int = 10) -> Optional[str]:
-        """
-        Read response from the Arduino device.
-
-        Args:
-            max_lines: Maximum number of lines to read
-
-        Returns:
-            Optional[str]: Response from Arduino or None if error occurred
-        """
         if not self.is_connected():
             logger.error("No active connection to Arduino")
             return None
         try:
             response_lines = []
             for _ in range(max_lines):
-                line = self.connection.readline().decode('utf-8').strip()
+                line = self.connection.readline().decode('utf-8', errors='ignore').strip()
                 if line:
                     response_lines.append(line)
-                    # Check for terminal response indicators
-                    if any(indicator in line for indicator in
-                           [ArduinoResponses.STATUS_OK, ArduinoResponses.ERROR,
-                            ArduinoResponses.OK, ArduinoResponses.DEVICE_ID]):
+                    # Stop early on clear terminators
+                    if any(ind in line for ind in (
+                        ArduinoResponses.STATUS_OK,
+                        ArduinoResponses.ERROR,
+                        ArduinoResponses.OK,
+                        ArduinoResponses.DEVICE_ID
+                    )):
                         break
                 else:
                     break
             response = '\n'.join(response_lines) if response_lines else None
-            logger.debug(f"Response received: {response}")
+            logger.debug(f"Response received:\n{response}")
             return response
         except Exception as e:
             logger.error(f"Error reading response: {e}")
             return None
 
     def _is_success_response(self, response: Optional[str]) -> bool:
-        """
-        Check if response indicates successful operation.
-
-        Args:
-            response: Response string from Arduino
-
-        Returns:
-            bool: True if response indicates success
-        """
         if not response:
             return False
+        # STATUS lines after commands are considered OK if they don't include ERR
         return (ArduinoResponses.STATUS_OK in response or
-                ArduinoResponses.OK in response) and ArduinoResponses.ERROR not in response
+                ArduinoResponses.OK in response or
+                ArduinoResponses.DEVICE_ID in response) and \
+               ArduinoResponses.ERROR not in response
 
     def _parse_status_response(self, response: str) -> Dict[str, Any]:
         """
-        Parse status response into structured data.
-
-        Args:
-            response: Raw status response from Arduino
-
-        Returns:
-            Dict[str, Any]: Parsed status information
+        Expected STATUS format (from Arduino):
+          STATUS 0:OFF 1:ON 2:OFF 3:OFF 4:ON 5:OFF
         """
-        # Basic parsing - can be extended based on actual Arduino response format
+        status_line = None
+        for line in response.splitlines():
+            if line.startswith(ArduinoResponses.STATUS_OK):
+                status_line = line
+                break
+        channels: Dict[int, bool] = {}
+        if status_line:
+            parts = status_line.split()[1:]  # skip "STATUS"
+            for tok in parts:
+                if ':' in tok:
+                    idx, val = tok.split(':', 1)
+                    try:
+                        ch = int(idx)
+                        channels[ch] = (val.upper() == 'ON')
+                    except ValueError:
+                        continue
         return {
             'raw_response': response,
             'timestamp': time.time(),
-            'connected': True
+            'connected': True,
+            'channels': channels
         }
 
     def _cleanup_connection(self) -> None:
-        """Clean up connection resources."""
         if self.connection:
             try:
                 self.connection.close()
@@ -354,35 +294,30 @@ class ArduinoRelayController:
                 self.connection = None
 
     def __enter__(self):
-        """Context manager entry."""
         if not self.connect():
             raise RuntimeError("Failed to connect to Arduino")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
         self.disconnect()
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
-    """
-    Create and configure the command-line argument parser.
-
-    Returns:
-        argparse.ArgumentParser: Configured parser
-    """
     parser = argparse.ArgumentParser(
         description="Professional Arduino Relay Controller for labgrid integration",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Usage Examples:
-  %(prog)s on 0                    # Turn on relay channel 0
-  %(prog)s off 1                   # Turn off relay channel 1  
+  %(prog)s on 0 1 3                # Turn ON channels 0,1,3
+  %(prog)s off 2 5                 # Turn OFF channels 2 and 5
+  %(prog)s toggle 0 4              # Toggle channels 0 and 4
+  %(prog)s pulse 1 500             # Pulse channel 1 for 500 ms
+  %(prog)s all-on                  # Turn ON all relays
+  %(prog)s all-off                 # Turn OFF all relays
   %(prog)s status                  # Show status of all relays
-  %(prog)s all-off                 # Turn off all relays
-  %(prog)s --port /dev/ttyUSB0 status  # Use custom port
+  %(prog)s --port /dev/ttyUSB0 on 0 1  # Use custom port
 
-Error Codes:
+Exit Codes:
   0 - Success
   1 - Connection error
   2 - Command execution error
@@ -391,69 +326,60 @@ Error Codes:
     )
 
     # Global options
-    parser.add_argument(
-        '--port',
-        default='/dev/arduino-relay',
-        help='Serial port path (default: /dev/arduino-relay)'
-    )
-    parser.add_argument(
-        '--baudrate',
-        type=int,
-        default=115200,
-        help='Serial communication speed (default: 115200)'
-    )
-    parser.add_argument(
-        '--timeout',
-        type=float,
-        default=2.0,
-        help='Communication timeout in seconds (default: 2.0)'
-    )
-    parser.add_argument(
-        '--verbose', '-v',
-        action='store_true',
-        help='Enable verbose logging output'
-    )
-    # Subcommands
+    parser.add_argument('--port', default='/dev/arduino-relay',
+                        help='Serial port path (default: /dev/arduino-relay)')
+    parser.add_argument('--baudrate', type=int, default=115200,
+                        help='Serial communication speed (default: 115200)')
+    parser.add_argument('--timeout', type=float, default=2.0,
+                        help='Communication timeout in seconds (default: 2.0)')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                        help='Enable verbose logging output')
+
     subparsers = parser.add_subparsers(dest='action', help='Available actions')
-    # ON command
-    on_parser = subparsers.add_parser('on', help='Turn on a relay channel')
-    on_parser.add_argument(
-        'channel',
-        type=int,
-        choices=range(6),
-        help='Relay channel number (0-5)'
-    )
-    # OFF command
-    off_parser = subparsers.add_parser('off', help='Turn off a relay channel')
-    off_parser.add_argument(
-        'channel',
-        type=int,
-        choices=range(6),
-        help='Relay channel number (0-5)'
-    )
-    # STATUS command
+
+    # ON
+    on_parser = subparsers.add_parser('on', help='Turn ON one or more channels')
+    on_parser.add_argument('channels', nargs='+', type=int, choices=range(6),
+                           help='Relay channels (0-5). Multiple allowed.')
+
+    # OFF
+    off_parser = subparsers.add_parser('off', help='Turn OFF one or more channels')
+    off_parser.add_argument('channels', nargs='+', type=int, choices=range(6),
+                            help='Relay channels (0-5). Multiple allowed.')
+
+    # TOGGLE
+    tog_parser = subparsers.add_parser('toggle', help='Toggle one or more channels')
+    tog_parser.add_argument('channels', nargs='+', type=int, choices=range(6),
+                            help='Relay channels (0-5). Multiple allowed.')
+
+    # PULSE
+    pulse_parser = subparsers.add_parser('pulse', help='Pulse a channel for ms')
+    pulse_parser.add_argument('channel', type=int, choices=range(6),
+                              help='Relay channel (0-5)')
+    pulse_parser.add_argument('milliseconds', type=int,
+                              help='Pulse width in milliseconds (1..60000)')
+
+    # STATUS
     subparsers.add_parser('status', help='Show status of all relay channels')
-    # ALL-OFF command
-    subparsers.add_parser('all-off', help='Turn off all relay channels')
+
+    # ALL-ON / ALL-OFF
+    subparsers.add_parser('all-on', help='Turn ON all relay channels')
+    subparsers.add_parser('all-off', help='Turn OFF all relay channels')
 
     return parser
 
-def main() -> int:
-    """
-    Main entry point for command-line usage.
 
-    Returns:
-        int: Exit code (0 for success, non-zero for errors)
-    """
+def main() -> int:
     parser = create_argument_parser()
     args = parser.parse_args()
-    # Configure logging level
+
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+
     if not args.action:
         parser.print_help()
         return 3
-    # Create and connect to controller
+
     controller = ArduinoRelayController(
         port=args.port,
         baudrate=args.baudrate,
@@ -464,19 +390,40 @@ def main() -> int:
         return 1
 
     try:
-        # Execute requested action
         success = False
         if args.action == 'on':
-            success = controller.relay_on(args.channel)
+            # Keep backward-compat: if one channel passed, fine; else multi
+            if len(args.channels) == 1:
+                success = controller.relay_on(args.channels[0])
+            else:
+                success = controller.relays_on(args.channels)
+
         elif args.action == 'off':
-            success = controller.relay_off(args.channel)
+            if len(args.channels) == 1:
+                success = controller.relay_off(args.channels[0])
+            else:
+                success = controller.relays_off(args.channels)
+
+        elif args.action == 'toggle':
+            success = controller.relays_toggle(args.channels)
+
+        elif args.action == 'pulse':
+            success = controller.pulse(args.channel, args.milliseconds)
+
         elif args.action == 'status':
             status = controller.get_status()
             success = status is not None
             if success and status:
-                print(f"Relay Status: {status['raw_response']}")
+                ch_map = status.get('channels', {})
+                pretty = ' '.join(f'{k}:{ "ON" if v else "OFF"}' for k, v in sorted(ch_map.items()))
+                print(f"STATUS {pretty}" if pretty else status['raw_response'])
+
         elif args.action == 'all-off':
             success = controller.all_relays_off()
+
+        elif args.action == 'all-on':
+            success = controller.all_relays_on()
+
         return 0 if success else 2
 
     except ValueError as e:
