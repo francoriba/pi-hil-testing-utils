@@ -1,28 +1,10 @@
 #!/usr/bin/env python3
 """
-Arduino Relay Control Script
-============================
-
-Script for controlling a 6-relay module connected to an Arduino
-via USB-Serial interface.
-
-Author: FCEFyN-UNC
-Project: pi-hil-testing-utils
-Version: 1.1.0
-License: MIT
-
-Features:
-- Control individual relays (0-5)
-- Multi-channel operations (e.g., on 0 1 3)
-- Bulk operations (all-on / all-off)
-- Toggle and pulse (per-channel)
-- Status monitoring (parsed)
-- Error handling and logging
-- Command-line interface
-- Robust serial communication
+Arduino Relay Control Script - Version with persistent connection cache
 """
 
 import argparse
+import fcntl
 import logging
 import serial
 import sys
@@ -30,13 +12,14 @@ import time
 from enum import IntEnum
 from typing import Optional, Dict, Any, Iterable, List
 
-# Configure logging
+import socket
+import json
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
 
 class RelayChannel(IntEnum):
     CHANNEL_0 = 0
@@ -65,70 +48,158 @@ class ArduinoResponses:
     OK = "OK"
 
 
-class ArduinoRelayController:
+class PersistentArduinoController:
     """
-    Robust interface for controlling a 6-channel relay module via Arduino (Serial).
+    Controlador que mantiene la conexión abierta usando un lockfile
+    para evitar el auto-reset del Arduino.
     """
-
-    def __init__(
-            self,
-            port: str = '/dev/arduino-relay',
-            baudrate: int = 115200,
-            timeout: float = 2.0
-    ) -> None:
-        self.port = port
-        self.baudrate = baudrate
-        self.timeout = timeout
-        self.connection: Optional[serial.Serial] = None
-        logger.info(f"Initialized ArduinoRelayController - Port: {port}, Baudrate: {baudrate}")
-
-    def connect(self) -> bool:
+    
+    _instance = None
+    _connection = None
+    _lockfile = None
+    
+    def __new__(cls, port: str = '/dev/arduino-relay', baudrate: int = 115200):
+        # Singleton por puerto
+        if cls._instance is None or cls._instance.port != port:
+            cls._instance = super().__new__(cls)
+            cls._instance.port = port
+            cls._instance.baudrate = baudrate
+            cls._instance.timeout = 2.0
+            cls._instance._lockfile_path = f"/tmp/arduino-relay-{port.replace('/', '_')}.lock"
+        return cls._instance
+    
+    def get_connection(self) -> Optional[serial.Serial]:
+        """Obtiene la conexión persistente, creándola si es necesario."""
+        
+        # Si ya tenemos conexión activa, usarla
+        if self._connection and self._connection.is_open:
+            return self._connection
+            
+        # Intentar obtener el lock
         try:
-            logger.info(f"Attempting to connect to Arduino on port {self.port}")
-
-            self.connection = serial.Serial(
+            self._lockfile = open(self._lockfile_path, 'w')
+            fcntl.flock(self._lockfile.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            
+            # Somos los únicos con el lock, crear conexión
+            logging.info(f"Acquiring persistent connection to {self.port}")
+            
+            self._connection = serial.Serial(
                 port=self.port,
                 baudrate=self.baudrate,
                 timeout=self.timeout,
                 write_timeout=self.timeout
             )
-
-            # Allow Arduino to reset after opening serial
+            
+            # Solo esperar reset la primera vez
             time.sleep(2)
-
-            self.connection.reset_input_buffer()
-            self.connection.reset_output_buffer()
-
-            # Verify device responds correctly
-            if self._send_command(ArduinoCommands.ID):
-                response = self._read_response()
-                if response and ArduinoResponses.DEVICE_ID in response:
-                    logger.info(f"Arduino connected successfully: {response.strip()}")
-                    return True
-                else:
-                    logger.error(f"Invalid device response: {response}")
-
-            logger.error("Failed to verify Arduino device")
-            self._cleanup_connection()
-            return False
-
-        except serial.SerialException as e:
-            logger.error(f"Serial communication error: {e}")
-            self._cleanup_connection()
-            return False
+            self._connection.reset_input_buffer()
+            self._connection.reset_output_buffer()
+            
+            # Verificar que funciona
+            self._connection.write(b"ID\n")
+            self._connection.flush()
+            response = self._connection.readline().decode('utf-8', errors='ignore').strip()
+            
+            if "RELAY-CTRL" not in response:
+                raise Exception(f"Invalid Arduino response: {response}")
+                
+            logging.info("Persistent Arduino connection established")
+            return self._connection
+            
+        except (IOError, OSError):
+            # Otro proceso tiene el lock, la conexión ya existe
+            # Esperar un poco y reintentar
+            logging.debug("Another process holds the Arduino connection")
+            time.sleep(0.1)
+            return None
+            
         except Exception as e:
-            logger.error(f"Unexpected error during connection: {e}")
-            self._cleanup_connection()
-            return False
+            logging.error(f"Failed to create persistent connection: {e}")
+            self._cleanup()
+            return None
+    
+    def send_command(self, command: str) -> Optional[str]:
+        """Envía un comando usando la conexión persistente."""
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            conn = self.get_connection()
+            if not conn:
+                time.sleep(0.1)
+                continue
+                
+            try:
+                # Enviar comando
+                cmd_bytes = f"{command}\n".encode('utf-8')
+                conn.write(cmd_bytes)
+                conn.flush()
+                
+                # Leer respuesta
+                response_lines = []
+                for _ in range(10):
+                    line = conn.readline().decode('utf-8', errors='ignore').strip()
+                    if line:
+                        response_lines.append(line)
+                        if any(term in line for term in ["STATUS", "ERR", "OK", "RELAY-CTRL"]):
+                            break
+                    else:
+                        break
+                        
+                response = '\n'.join(response_lines)
+                logging.debug(f"Command: {command} -> Response: {response}")
+                return response
+                
+            except Exception as e:
+                logging.error(f"Error sending command (attempt {attempt+1}): {e}")
+                self._cleanup()
+                if attempt < max_retries - 1:
+                    time.sleep(0.5)
+                    
+        return None
+    
+    def _cleanup(self):
+        """Limpia la conexión y el lockfile."""
+        if self._connection:
+            try:
+                self._connection.close()
+            except:
+                pass
+            self._connection = None
+            
+        if self._lockfile:
+            try:
+                fcntl.flock(self._lockfile.fileno(), fcntl.LOCK_UN)
+                self._lockfile.close()
+            except:
+                pass
+            self._lockfile = None
+    
+    def __del__(self):
+        self._cleanup()
+
+
+# Actualizar la clase principal para usar el controlador persistente
+class ArduinoRelayController:
+    """Interfaz compatible que usa conexión persistente internamente."""
+    
+    def __init__(self, port: str = '/dev/arduino-relay', baudrate: int = 115200, timeout: float = 2.0):
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self._persistent = PersistentArduinoController(port, baudrate)
+        logger.info(f"Initialized ArduinoRelayController - Port: {port}, Baudrate: {baudrate}")
+
+    def connect(self) -> bool:
+        """Conecta usando el controlador persistente."""
+        return self._persistent.get_connection() is not None
 
     def disconnect(self) -> None:
-        if self.connection and self.connection.is_open:
-            logger.info("Disconnecting from Arduino")
-            self.connection.close()
-            self.connection = None
+        """No-op - la conexión se mantiene persistente."""
+        pass
 
     def is_connected(self) -> bool:
-        return self.connection is not None and self.connection.is_open
+        """Verifica si hay conexión disponible."""
+        return self._persistent.get_connection() is not None
 
     # -------- Single-channel helpers (kept for compatibility) --------
     def relay_on(self, channel: int) -> bool:
@@ -212,8 +283,7 @@ class ArduinoRelayController:
             return False
         try:
             cmd_bytes = f"{command}\n".encode('utf-8')
-            self.connection.write(cmd_bytes)
-            self.connection.flush()
+            self._persistent.send_command(command) # Use persistent send_command
             logger.debug(f"Command sent: {command}")
             return True
         except Exception as e:
@@ -227,7 +297,7 @@ class ArduinoRelayController:
         try:
             response_lines = []
             for _ in range(max_lines):
-                line = self.connection.readline().decode('utf-8', errors='ignore').strip()
+                line = self._persistent.send_command("STATUS") # Use persistent send_command
                 if line:
                     response_lines.append(line)
                     # Stop early on clear terminators
@@ -285,13 +355,8 @@ class ArduinoRelayController:
         }
 
     def _cleanup_connection(self) -> None:
-        if self.connection:
-            try:
-                self.connection.close()
-            except Exception as e:
-                logger.debug(f"Error during connection cleanup: {e}")
-            finally:
-                self.connection = None
+        # This method is no longer needed as connection is persistent
+        pass
 
     def __enter__(self):
         if not self.connect():
@@ -302,9 +367,41 @@ class ArduinoRelayController:
         self.disconnect()
 
 
+class DaemonClient:
+    """Cliente simple para comunicarse con el daemon."""
+    
+    def __init__(self, socket_path: str = "/tmp/arduino-relay.sock"):
+        self.socket_path = socket_path
+    
+    def is_daemon_running(self) -> bool:
+        """Verifica si el daemon está corriendo."""
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(1.0)
+                sock.connect(self.socket_path)
+                return True
+        except:
+            return False
+    
+    def send_command(self, command: str) -> dict:
+        """Envía comando al daemon."""
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(5.0)
+                sock.connect(self.socket_path)
+                
+                request = {"command": command}
+                sock.send(json.dumps(request).encode('utf-8'))
+                
+                response_data = sock.recv(4096)
+                return json.loads(response_data.decode('utf-8'))
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+
 def create_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Professional Arduino Relay Controller for labgrid integration",
+        description="Arduino Relay Controller for labgrid integration",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Usage Examples:
@@ -380,6 +477,55 @@ def main() -> int:
         parser.print_help()
         return 3
 
+    # Detectar si el daemon está corriendo
+    daemon_client = DaemonClient()
+    use_daemon = daemon_client.is_daemon_running()
+    
+    if use_daemon:
+        logger.info("Using Arduino daemon (no reset)")
+        return _execute_via_daemon(args, daemon_client)
+    else:
+        logger.info("Using direct connection (may cause reset)")
+        return _execute_direct(args)
+
+def _execute_via_daemon(args, daemon_client: DaemonClient) -> int:
+    """Ejecuta comandos vía daemon."""
+    try:
+        # Construir comando para el daemon
+        if args.action == 'on':
+            cmd = f"ON {' '.join(map(str, args.channels))}"
+        elif args.action == 'off':
+            cmd = f"OFF {' '.join(map(str, args.channels))}"
+        elif args.action == 'toggle':
+            cmd = f"TOGGLE {' '.join(map(str, args.channels))}"
+        elif args.action == 'pulse':
+            cmd = f"PULSE {args.channel} {args.milliseconds}"
+        elif args.action == 'status':
+            cmd = "STATUS"
+        elif args.action == 'all-off':
+            cmd = "ALLOFF"
+        elif args.action == 'all-on':
+            cmd = "ALLON"
+        else:
+            return 3
+            
+        # Enviar al daemon
+        result = daemon_client.send_command(cmd)
+        
+        if result.get("success", False):
+            if args.action == 'status':
+                print(result.get("response", ""))
+            return 0
+        else:
+            logger.error(f"Daemon command failed: {result.get('error', 'Unknown error')}")
+            return 2
+            
+    except Exception as e:
+        logger.error(f"Error communicating with daemon: {e}")
+        return 2
+
+def _execute_direct(args) -> int:
+    """Ejecuta comandos directamente (método original)."""
     controller = ArduinoRelayController(
         port=args.port,
         baudrate=args.baudrate,
@@ -392,7 +538,6 @@ def main() -> int:
     try:
         success = False
         if args.action == 'on':
-            # Keep backward-compat: if one channel passed, fine; else multi
             if len(args.channels) == 1:
                 success = controller.relay_on(args.channels[0])
             else:
