@@ -36,13 +36,12 @@ check_serial_port() {
 
 power_on_sequence() {
   log "Power seq…"
-  #python3 "$ARDUINO_SCRIPT" on  "$POWER_RELAY_CHANNEL"
-  #python3 "$ARDUINO_SCRIPT" on  "$SERIAL_RELAY_CHANNEL"
-  python3 "$ARDUINO_SCRIPT" on "$POWER_RELAY_CHANNEL" "$SERIAL_RELAY_CHANNEL" || { err "No pude encender relés power+serial"; exit 1; } # apago serial y router
+  python3 "$ARDUINO_SCRIPT" off  "$POWER_RELAY_CHANNEL"
+  python3 "$ARDUINO_SCRIPT" on  "$SERIAL_RELAY_CHANNEL"
   sleep 3
-  python3 "$ARDUINO_SCRIPT" off "$POWER_RELAY_CHANNEL" # prendo router
+  python3 "$ARDUINO_SCRIPT" on "$POWER_RELAY_CHANNEL" # prendo router
   sleep "$WAIT_AFTER_POWER"
-  python3 "$ARDUINO_SCRIPT" off "$SERIAL_RELAY_CHANNEL" # prendo serial
+  python3 "$ARDUINO_SCRIPT" on "$SERIAL_RELAY_CHANNEL" # prendo serial
   sleep "$WAIT_AFTER_SERIAL"
   ok "Power seq OK"
 }
