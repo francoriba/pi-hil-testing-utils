@@ -1,0 +1,26 @@
+
+# /etc/udev/rules.d/99-serial-devices.rules
+# sudo udevadm control --reload-rules
+# sudo udevadm trigger
+# ls -l /dev/arduino-relay /dev/glinet-mango
+
+
+# Arduino (CH340 directo al host)
+SUBSYSTEM=="tty", ENV{ID_PATH}=="pci-0000:00:14.0-usb-0:2:1.0", \
+  SYMLINK+="arduino-relay", MODE="0666", GROUP="dialout", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# Router GL-MT300N-V2 (CH340 en hub TP-Link UH700, puerto 1.1.1)
+SUBSYSTEM=="tty", ENV{ID_PATH}=="pci-0000:00:14.0-usb-0:1.1.1:1.0", \
+  SYMLINK+="glinet-mango", MODE="0666", GROUP="dialout", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+ # Router OpenwrtOne en el hub (puerto 1.1.2)
+SUBSYSTEM=="tty", ENV{ID_PATH}=="pci-0000:00:14.0-usb-0:1.1.2:1.0", \
+  SYMLINK+="openwrt-one", MODE="0666", GROUP="dialout", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# Router Belkin RT3200 #1 (CP210x en hub TP-Link UH700, puerto 1.1.3)
+SUBSYSTEM=="tty", ENV{ID_PATH}=="pci-0000:00:14.0-usb-0:1.1.3:1.0", \
+  SYMLINK+="belkin-rt3200-1", MODE="0666", GROUP="dialout", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# Router Belkin RT3200 #2 (CH340 en hub TP-Link UH700, puerto 1.1.4)
+SUBSYSTEM=="tty", ENV{ID_PATH}=="pci-0000:00:14.0-usb-0:1.1.4:1.0", \
+  SYMLINK+="belkin-rt3200-2", MODE="0666", GROUP="dialout", ENV{ID_MM_DEVICE_IGNORE}="1"
